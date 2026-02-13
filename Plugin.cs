@@ -35,6 +35,9 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
         /// <summary>距离地表此高度（米）以内不再控制速度，交由游戏逻辑处理</summary>
         internal const double HandoffHeightAboveSurface = 10.0;
 
+        /// <summary>距落点此距离（米）内将速度降至 LandingSpeed，避免远距离奔袭到达时过快被弹飞</summary>
+        internal const double DecelStartDistFromLand = 100.0;
+
         /// <summary>落地时目标速度（m/s），先快后慢的缓动确保平稳着陆</summary>
         internal const double LandingSpeed = 30.0;
 
@@ -62,6 +65,9 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
         /// <summary>本 Mod 生成的坠落物：尾焰粒子 + 目标落点 + 生成时间与位置（用于平滑轨道）</summary>
         internal readonly List<(int trashIndex, GameObject trailGo, float landedAt, Vector3 targetLandPosLocal, double spawnGameTime, VectorLF3 spawnPos)> _trashTrails = new List<(int, GameObject, float, Vector3, double, VectorLF3)>();
         private const float TrailDestroyDelayAfterLand = 2.5f;
+
+        /// <summary>本 Mod 生成的太空掉落：trashIndex → 目标星 astroId。游戏 Gravity 每帧会把 nearPlanetId 置 0，无法依赖其统计，故自维护此表用于每星配额。</summary>
+        internal static readonly List<(int index, int targetAstroId)> _ourSpaceTrashTargets = new List<(int, int)>();
 
         private void Awake()
         {
@@ -254,24 +260,26 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
             return distSq <= TrailMaxDistFromLocalPlanet * TrailMaxDistFromLocalPlanet;
         }
 
-        /// <summary>统计当前存活垃圾中目标为该星球的数量（nearPlanetId 或 landPlanetId 等于该星），用于每星上限。</summary>
-        internal static int CountTrashForPlanet(int planetId)
+        /// <summary>统计当前存活且目标为该星球的、本 Mod 生成的太空掉落数量。游戏 Gravity 每帧会置 nearPlanetId=0，无法依赖 TrashData 统计，故用自维护的 _ourSpaceTrashTargets。</summary>
+        internal static int CountTrashForPlanet(PlanetData planet)
         {
+            if (planet == null) return 0;
             var container = GameMain.data?.trashSystem?.container;
-            if (container?.trashDataPool == null || container.trashObjPool == null)
+            if (container?.trashObjPool == null)
                 return 0;
-            int n = 0;
-            int cursor = container.trashCursor;
-            var dataPool = container.trashDataPool;
             var objPool = container.trashObjPool;
-            for (int i = 0; i < cursor; i++)
+            int astroId = planet.astroId;
+            // 先移除已失效的槽位（被游戏 RemoveTrash 的）
+            for (int i = _ourSpaceTrashTargets.Count - 1; i >= 0; i--)
             {
-                if (objPool[i].item == 0)
-                    continue;
-                int p = dataPool[i].nearPlanetId != 0 ? dataPool[i].nearPlanetId : dataPool[i].landPlanetId;
-                if (p == planetId)
-                    n++;
+                int idx = _ourSpaceTrashTargets[i].index;
+                if (idx < 0 || idx >= objPool.Length || objPool[idx].item == 0)
+                    _ourSpaceTrashTargets.RemoveAt(i);
             }
+            int n = 0;
+            for (int i = 0; i < _ourSpaceTrashTargets.Count; i++)
+                if (_ourSpaceTrashTargets[i].targetAstroId == astroId)
+                    n++;
             return n;
         }
 
@@ -385,6 +393,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
             var trashObj = new TrashObject(itemId, chunk, 0, rPos, rRot);
 
             int trashIndex = trashSystem.container.NewTrash(trashObj, trashData);
+            _ourSpaceTrashTargets.Add((trashIndex, planet.astroId));
             if (_currentPlanetSpawnQuota > 0)
                 _currentPlanetSpawnQuota--;
             try
@@ -624,7 +633,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                     return;
 
                 var planet = Plugin.GetPlanetWithBattleBase(deathPos);
-                Plugin._currentPlanetSpawnQuota = planet != null ? Math.Max(0, Plugin.MaxTrashPerPlanet - Plugin.CountTrashForPlanet(planet.id)) : -1;
+                Plugin._currentPlanetSpawnQuota = planet != null ? Math.Max(0, Plugin.MaxTrashPerPlanet - Plugin.CountTrashForPlanet(planet)) : -1;
 
                 if (planet != null && Plugin._currentPlanetSpawnQuota == 0)
                 {
@@ -704,7 +713,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                     return;
 
                 var planet = Plugin.GetPlanetWithBattleBase(deathPos);
-                Plugin._currentPlanetSpawnQuota = planet != null ? Math.Max(0, Plugin.MaxTrashPerPlanet - Plugin.CountTrashForPlanet(planet.id)) : -1;
+                Plugin._currentPlanetSpawnQuota = planet != null ? Math.Max(0, Plugin.MaxTrashPerPlanet - Plugin.CountTrashForPlanet(planet)) : -1;
 
                 if (planet != null && Plugin._currentPlanetSpawnQuota == 0)
                 {
@@ -982,6 +991,16 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                     double heightAboveSurface = Math.Sqrt(dx * dx + dy * dy + dz * dz) - planetRadius;
                     if (heightAboveSurface < Plugin.HandoffHeightAboveSurface)
                         continue;
+
+                    double toLandX = P3.x - px, toLandY = P3.y - py, toLandZ = P3.z - pz;
+                    double distToLand = Math.Sqrt(toLandX * toLandX + toLandY * toLandY + toLandZ * toLandZ);
+                    if (distToLand <= Plugin.DecelStartDistFromLand && distToLand > 1e-6)
+                    {
+                        double scale = Plugin.LandingSpeed / distToLand;
+                        vx = toLandX * scale;
+                        vy = toLandY * scale;
+                        vz = toLandZ * scale;
+                    }
 
                     ref TrashData trash = ref dataPool[index];
                     trash.uPos.x = px;
