@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <DSPGamePath>C:\Program Files (x86)\Steam\steamapps\common\Dyson Sphere Program</DSPGamePath>
+    <BepInExPath>C:\Users\uniea\AppData\Roaming\r2modmanPlus-local\DysonSphereProgram\profiles\Default\BepInEx</BepInExPath>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>BattlefieldAnalysisBaseCollectSpaceJunk</AssemblyName>
+    <RootNamespace>BattlefieldAnalysisBaseCollectSpaceJunk</RootNamespace>
+    <Version>0.1.0</Version>
+    <Description>Collect space fleet debris into battlefield analysis bases (v0.1: test trash animation).</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExPath)\core\BepInEx.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExPath)\core\0Harmony.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(DSPGamePath)\DSPGAME_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(DSPGamePath)\DSPGAME_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(DSPGamePath)\DSPGAME_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(DSPGamePath)\DSPGAME_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule">
+      <HintPath>$(DSPGamePath)\DSPGAME_Data\Managed\UnityEngine.ParticleSystemModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="GameCodeReference\**\*.cs" />
+  </ItemGroup>
+
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+    <Exec Command="if not exist &quot;$(BepInExPath)\plugins\$(TargetName)&quot; mkdir &quot;$(BepInExPath)\plugins\$(TargetName)&quot;" />
+    <Exec Command="xcopy /Y &quot;$(TargetPath)&quot; &quot;$(BepInExPath)\plugins\$(TargetName)\&quot;" />
+  </Target>
+
+</Project>
