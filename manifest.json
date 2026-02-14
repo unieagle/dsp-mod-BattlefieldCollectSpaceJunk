@@ -1,1 +1,7 @@
-{"name":"BattlefieldAnalysisBaseCollectSpaceJunk","version_number":"0.1.0","website_url":"","description":"Collect space fleet debris into battlefield analysis bases. v0.1: test trash drop animation (iron ore every 5s near random base).","dependencies":[]}
+{
+    "name": "BattlefieldAnalysisBaseCollectSpaceJunk",
+    "version_number": "0.1.0",
+    "website_url": "https://github.com/unieagle/dsp-mod-BattlefieldCollectSpaceJunk.git",
+    "description": "Collect space fleet debris into battlefield analysis bases.",
+    "dependencies": []
+}

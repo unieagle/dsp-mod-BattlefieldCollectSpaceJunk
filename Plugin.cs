@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using BepInEx;
+using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
@@ -13,6 +14,10 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
     {
         public static ManualLogSource? Log;
         internal static Plugin? Instance;
+
+        /// <summary>为 true 时在日志中输出详细调试信息；false 时仅保留错误与加载提示。</summary>
+        internal static bool EnableDebugLog => _enableDebugLog?.Value ?? false;
+        private static ConfigEntry<bool>? _enableDebugLog;
 
         /// <summary>太空舰船掉落：抽选次数（地面为 3），允许抽到无掉落。</summary>
         internal const int SpaceDropRollCount = 20;
@@ -98,17 +103,20 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
         {
             Log = Logger;
             Instance = this;
+            _enableDebugLog = Config.Bind("General", "EnableDebugLog", false,
+                "为 true 时在日志中输出详细的调试信息，用于排查问题。正常使用时建议设置为 false。\nSetting type: Boolean\nDefault value: false");
             var harmony = new Harmony(PluginInfo.PLUGIN_GUID);
             harmony.PatchAll(typeof(SpaceCraftDeathPatch));
             harmony.PatchAll(typeof(SpaceEnemyDeathPatch));
             harmony.PatchAll(typeof(TrashSystemGravityPatch));
             Log.LogInfo($"[{PluginInfo.PLUGIN_NAME}] 加载中 (GUID: {PluginInfo.PLUGIN_GUID})");
-            Log.LogInfo($"[{PluginInfo.PLUGIN_NAME}] 击毁黑雾太空飞船时，按地面掉落表抽选 {SpaceDropRollCount} 次、数量×{SpaceDropCountMultiplier}，掉落等级取自巢穴 evolve.level（无巢穴或玩家舰船击毁时用 fallback={SpaceCraftEnemyLevelFallback}），从飞船位置坠向战场基站。");
+            if (EnableDebugLog)
+                Log.LogInfo($"[{PluginInfo.PLUGIN_NAME}] 击毁黑雾太空飞船时，按地面掉落表抽选 {SpaceDropRollCount} 次、数量×{SpaceDropCountMultiplier}，掉落等级取自巢穴 evolve.level（无巢穴或玩家舰船击毁时用 fallback={SpaceCraftEnemyLevelFallback}），从飞船位置坠向战场基站。");
         }
 
         private void Update()
         {
-            if (!_hasLoggedEnemyDropTable && LDB.items?.dataArray != null)
+            if (EnableDebugLog && !_hasLoggedEnemyDropTable && LDB.items?.dataArray != null)
             {
                 LogEnemyDropTable();
                 _hasLoggedEnemyDropTable = true;
@@ -664,7 +672,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                 var planet = Plugin.GetPlanetWithBattleBase(deathPos);
                 Plugin._currentPlanetSpawnQuota = planet != null ? Math.Max(0, Plugin.MaxTrashPerPlanet - Plugin.CountTrashForPlanet(planet)) : -1;
 
-                if (planet != null && Plugin._currentPlanetSpawnQuota == 0)
+                if (planet != null && Plugin._currentPlanetSpawnQuota == 0 && Plugin.EnableDebugLog)
                 {
                     string pName = Plugin.GetPlanetNameAndDistance(planet, deathPos).planetName;
                     Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 落点行星（{pName}）已达垃圾堆数上限（{Plugin.MaxTrashPerPlanet}），本击毁不生成战利品。");
@@ -691,12 +699,12 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                     Plugin.SpawnTrashAtDeathPosition(deathPos, kv.Key, kv.Value);
                     totalSpawned++;
                 }
-                if (totalSpawned > 0 && planet != null && Plugin._currentPlanetSpawnQuota == 0)
+                if (Plugin.EnableDebugLog && totalSpawned > 0 && planet != null && Plugin._currentPlanetSpawnQuota == 0)
                 {
                     string pName = Plugin.GetPlanetNameAndDistance(planet, deathPos).planetName;
                     Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 落点行星（{pName}）已达垃圾堆数上限，本击毁仅生成 {totalSpawned} 批战利品。");
                 }
-                if (totalSpawned > 0)
+                if (Plugin.EnableDebugLog && totalSpawned > 0)
                 {
                     var nearest = Plugin.GetNearestPlanetUnconditional(deathPos);
                     var landing = Plugin.GetPlanetWithBattleBase(deathPos);
@@ -743,7 +751,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                 var planet = Plugin.GetPlanetWithBattleBase(deathPos);
                 Plugin._currentPlanetSpawnQuota = planet != null ? Math.Max(0, Plugin.MaxTrashPerPlanet - Plugin.CountTrashForPlanet(planet)) : -1;
 
-                if (planet != null && Plugin._currentPlanetSpawnQuota == 0)
+                if (Plugin.EnableDebugLog && planet != null && Plugin._currentPlanetSpawnQuota == 0)
                 {
                     string pName = Plugin.GetPlanetNameAndDistance(planet, deathPos).planetName;
                     Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 落点行星（{pName}）已达垃圾堆数上限（{Plugin.MaxTrashPerPlanet}），本击毁不生成战利品。");
@@ -754,7 +762,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                 var hive = __instance.GetHiveByAstroId(enemy.originAstroId);
                 if (hive != null)
                     enemyLevel = hive.evolve.level;
-                else
+                else if (Plugin.EnableDebugLog)
                     Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 掉落等级：无巢穴（originAstroId={enemy.originAstroId}），使用 fallback={Plugin.SpaceCraftEnemyLevelFallback}");
 
                 // 先抽选并汇总：同种物品合并数量，再按种类每种只生成 1 堆（数量=min(该种总量,stackSize)），减少 Trash 实体数、减轻性能压力。
@@ -777,12 +785,17 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                     Plugin.SpawnTrashAtDeathPosition(deathPos, kv.Key, kv.Value);
                     totalSpawned++;
                 }
-                if (totalSpawned > 0 && planet != null && Plugin._currentPlanetSpawnQuota == 0)
+                if (Plugin.EnableDebugLog && totalSpawned > 0 && planet != null && Plugin._currentPlanetSpawnQuota == 0)
                 {
                     string pName = Plugin.GetPlanetNameAndDistance(planet, deathPos).planetName;
                     Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 落点行星（{pName}）已达垃圾堆数上限，本击毁仅生成 {totalSpawned} 批战利品。");
                 }
                 if (totalSpawned > 0)
+                {
+                    foreach (int id in dropSummary.Keys)
+                        Plugin._everDroppedItemIds.Add(id);
+                }
+                if (Plugin.EnableDebugLog && totalSpawned > 0)
                 {
                     string enemyName = Plugin.GetEnemyName(enemy.protoId);
                     var nearest = Plugin.GetNearestPlanetUnconditional(deathPos);
@@ -799,8 +812,6 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                     Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 黑雾太空敌舰击毁，已生成 {totalSpawned} 批（{kindCount} 种）战利品。被击毁: {enemyName}。{nearestLine}{(string.IsNullOrEmpty(nearestLine) ? "" : "；")}{landingLine}");
                     if (dropSummary.Count > 0)
                     {
-                        foreach (int id in dropSummary.Keys)
-                            Plugin._everDroppedItemIds.Add(id);
                         // 每种 1 堆，数量不截断，为汇总值
                         string detail = string.Join("，", dropSummary.Select(kv => $"{Plugin.GetItemName(kv.Key)}-{kv.Value}"));
                         Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk]     战利品明细: {detail}");
