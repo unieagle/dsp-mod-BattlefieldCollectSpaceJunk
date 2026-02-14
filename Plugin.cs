@@ -54,7 +54,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
         private const double TrailMaxDistFromLocalPlanet = 2_000_000.0;
 
         /// <summary>每个目标星球最多允许的太空掉落堆数（未拾取/未过期），超出后本事件内不再生成，避免单星堆积过多。</summary>
-        internal const int MaxTrashPerPlanet = 1000;
+        internal const int MaxTrashPerPlanet = 2000;
 
         /// <summary>当前击毁事件剩余可生成堆数（由 Patch 在每次击毁时设置，SpawnTrashAtDeathPosition 扣减）。-1 表示不限制。</summary>
         internal static int _currentPlanetSpawnQuota = -1;
@@ -686,27 +686,23 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
         }
     }
 
-    /// <summary>仅太空黑雾：若方法由基类定义，PlanetFactory 与 SpaceSector 会走同一 MethodInfo，需用运行时类型排除地面。</summary>
-    [HarmonyPatch(typeof(SpaceSector), nameof(SpaceSector.RemoveEnemyWithComponents))]
+    /// <summary>仅在实际击毁时生成掉落。游戏有两类移除：RemoveEnemyFinal（集结/回收等仅移除）和 KillEnemyFinal（真正击毁，会建残骸），只 Patch 后者避免误判。</summary>
+    [HarmonyPatch(typeof(SpaceSector), nameof(SpaceSector.KillEnemyFinal))]
     public static class SpaceEnemyDeathPatch
     {
-        static void Prefix(object __instance, int id)
+        static void Prefix(SpaceSector __instance, int enemyId, ref CombatStat combatStat)
         {
             try
             {
-                if (__instance is PlanetFactory)
+                if (enemyId <= 0 || __instance.enemyPool == null || enemyId >= __instance.enemyPool.Length)
                     return;
-                if (__instance is not SpaceSector sector)
-                    return;
-                if (id <= 0 || sector.enemyPool == null || id >= sector.enemyPool.Length)
-                    return;
-                ref EnemyData enemy = ref sector.enemyPool[id];
-                if (enemy.id != id)
+                ref EnemyData enemy = ref __instance.enemyPool[enemyId];
+                if (enemy.id != enemyId)
                     return;
                 if (!enemy.isSpace)
                     return;
 
-                sector.TransformFromAstro(enemy.astroId, out VectorLF3 deathPos, enemy.pos);
+                __instance.TransformFromAstro(enemy.astroId, out VectorLF3 deathPos, enemy.pos);
 
                 var gd = GameMain.data;
                 if (gd?.trashSystem == null || ItemProto.enemyDropRangeTable == null)
