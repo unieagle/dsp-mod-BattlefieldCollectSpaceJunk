@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
@@ -13,14 +14,14 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
         public static ManualLogSource? Log;
         internal static Plugin? Instance;
 
-        /// <summary>太空舰船掉落：抽选次数（地面为 3）</summary>
-        internal const int SpaceDropRollCount = 12;
+        /// <summary>太空舰船掉落：抽选次数（地面为 3），允许抽到无掉落。</summary>
+        internal const int SpaceDropRollCount = 20;
 
         /// <summary>太空舰船掉落：数量倍数（地面为基础值）</summary>
         internal const int SpaceDropCountMultiplier = 100;
 
-        /// <summary>太空舰船等级（用于掉落等级判定，等效地面 level=18）</summary>
-        internal const int SpaceCraftEnemyLevel = 18;
+        /// <summary>太空敌舰掉落等级：无法从巢穴取得时使用的 fallback（游戏用 num2 = enemyLevel/3 与 EnemyDropLevel 比较）。</summary>
+        internal const int SpaceCraftEnemyLevelFallback = 18;
 
         /// <summary>落点相对基站的横向偏移范围（米），8-22 避免与基站模型重叠</summary>
         private const float LandOffsetMin = 8f;
@@ -62,6 +63,30 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
         private static uint _spaceDropSeed = 12345u;
         private bool _hasLoggedEnemyDropTable;
 
+        /// <summary>本局已掉落过的物品种类（用于统计“从未掉落”）。</summary>
+        internal static readonly HashSet<int> _everDroppedItemIds = new HashSet<int>();
+        private static HashSet<int>? _droppableItemIdsCache;
+
+        /// <summary>掉落表中可参与抽选的物品种类（EnemyDropRange.y &gt; 5E-05f，与游戏一致）。</summary>
+        internal static HashSet<int> GetDroppableItemIds()
+        {
+            if (_droppableItemIdsCache != null)
+                return _droppableItemIdsCache;
+            var set = new HashSet<int>();
+            var dataArray = LDB.items?.dataArray;
+            if (dataArray != null)
+            {
+                for (int j = 0; j < dataArray.Length; j++)
+                {
+                    var item = dataArray[j];
+                    if (item != null && item.EnemyDropRange.y > 5E-05f)
+                        set.Add(item.ID);
+                }
+            }
+            _droppableItemIdsCache = set;
+            return set;
+        }
+
         /// <summary>本 Mod 生成的坠落物：尾焰粒子 + 目标落点 + 生成时间与位置（用于平滑轨道）</summary>
         internal readonly List<(int trashIndex, GameObject trailGo, float landedAt, Vector3 targetLandPosLocal, double spawnGameTime, VectorLF3 spawnPos)> _trashTrails = new List<(int, GameObject, float, Vector3, double, VectorLF3)>();
         private const float TrailDestroyDelayAfterLand = 2.5f;
@@ -78,7 +103,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
             harmony.PatchAll(typeof(SpaceEnemyDeathPatch));
             harmony.PatchAll(typeof(TrashSystemGravityPatch));
             Log.LogInfo($"[{PluginInfo.PLUGIN_NAME}] 加载中 (GUID: {PluginInfo.PLUGIN_GUID})");
-            Log.LogInfo($"[{PluginInfo.PLUGIN_NAME}] 击毁黑雾太空飞船时，按地面掉落表抽选 {SpaceDropRollCount} 次、数量×{SpaceDropCountMultiplier}，从飞船位置坠向战场基站。");
+            Log.LogInfo($"[{PluginInfo.PLUGIN_NAME}] 击毁黑雾太空飞船时，按地面掉落表抽选 {SpaceDropRollCount} 次、数量×{SpaceDropCountMultiplier}，掉落等级取自巢穴 evolve.level（无巢穴或玩家舰船击毁时用 fallback={SpaceCraftEnemyLevelFallback}），从飞船位置坠向战场基站。");
         }
 
         private void Update()
@@ -429,6 +454,16 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
             return $"id{protoId}";
         }
 
+        /// <summary>用于日志：根据 itemId 返回物品显示名称。</summary>
+        internal static string GetItemName(int itemId)
+        {
+            var item = LDB.items?.Select(itemId);
+            if (item == null) return $"id{itemId}";
+            if (item.name != null && item.name.Length > 0) return item.name;
+            if (item.Name != null) return item.Name.Translate();
+            return $"id{itemId}";
+        }
+
         /// <summary>不带任何条件：全星图中离 pos 最近的行星（仅按距离）。与游戏 SpaceSector.GetNearestPlanet 一致：用 star.planetCount 限定循环，避免遍历 planets 数组中的空槽。</summary>
         internal static PlanetData? GetNearestPlanetUnconditional(VectorLF3 pos)
         {
@@ -550,7 +585,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
             return true;
         }
 
-        /// <summary>太空舰船掉落：复用地面掉落表逻辑，12 次抽选，数量×100。</summary>
+        /// <summary>太空舰船掉落：复用地面掉落表逻辑，数量×100。不考虑 theme/Mask；考虑用户设置：enemyDropScale、enemyDropMultiplier、解锁/CanDropByEnemy；enemyDropBans 由调用方在抽到后跳过。</summary>
         internal static void RandomDropItemForSpace(int enemyLevel, out int itemId, out int count, out int life)
         {
             _spaceDropSeed = (uint)((ulong)(_spaceDropSeed % 2147483646U + 1U) * 48271UL % 2147483647UL) - 1U;
@@ -561,16 +596,11 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
             int num2 = enemyLevel / 3;
             if (num2 > 8) num2 = 8;
             double num3 = 1.0;
-            int enemyDropMask = 2147483647;
+            // 太空掉落不走 Mask 逻辑：不打折、不按主题过滤，所有通过等级/解锁的物品均按完整数量参与计算。
             if (itemId > 0)
             {
                 if (num2 < ItemProto.enemyDropLevelTable[itemId])
                     itemId = 0;
-                if ((ItemProto.enemyDropMaskTable[itemId] & enemyDropMask) != enemyDropMask)
-                {
-                    num3 = (double)ItemProto.enemyDropMaskRatioTable[itemId];
-                    if (num3 < 1E-05) itemId = 0;
-                }
             }
             double num4 = 0.0;
             if (itemId > 0)
@@ -646,9 +676,13 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                 {
                     if (Plugin._currentPlanetSpawnQuota == 0)
                         break;
-                    Plugin.RandomDropItemForSpace(Plugin.SpaceCraftEnemyLevel, out int itemId, out int count, out int life);
+                    Plugin.RandomDropItemForSpace(Plugin.SpaceCraftEnemyLevelFallback, out int itemId, out int count, out int life);
                     if (itemId <= 0 || count <= 0)
                         continue;
+                    // 用户过滤：禁止掉落的物品不生成、不统计
+                    if (gd.trashSystem.enemyDropBans != null && gd.trashSystem.enemyDropBans.Contains(itemId))
+                        continue;
+                    Plugin._everDroppedItemIds.Add(itemId);
                     while (count > 0)
                     {
                         if (Plugin._currentPlanetSpawnQuota == 0)
@@ -717,21 +751,37 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                     Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 落点行星（{pName}）已达垃圾堆数上限（{Plugin.MaxTrashPerPlanet}），本击毁不生成战利品。");
                 }
 
+                // 等级取自该敌舰所属巢穴的 evolve.level，无巢穴时用 fallback；抽选允许无掉落。
+                int enemyLevel = Plugin.SpaceCraftEnemyLevelFallback;
+                var hive = __instance.GetHiveByAstroId(enemy.originAstroId);
+                if (hive != null)
+                    enemyLevel = hive.evolve.level;
+                else
+                    Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 掉落等级：无巢穴（originAstroId={enemy.originAstroId}），使用 fallback={Plugin.SpaceCraftEnemyLevelFallback}");
+
                 int totalSpawned = 0;
+                var dropSummary = new Dictionary<int, int>();
                 for (int i = 0; i < Plugin.SpaceDropRollCount; i++)
                 {
                     if (Plugin._currentPlanetSpawnQuota == 0)
                         break;
-                    Plugin.RandomDropItemForSpace(Plugin.SpaceCraftEnemyLevel, out int itemId, out int count, out int life);
+                    Plugin.RandomDropItemForSpace(enemyLevel, out int itemId, out int count, out int life);
                     if (itemId <= 0 || count <= 0)
                         continue;
+                    // 用户过滤：禁止掉落的物品不生成、不统计
+                    if (gd.trashSystem.enemyDropBans != null && gd.trashSystem.enemyDropBans.Contains(itemId))
+                        continue;
+                    int stackSize = LDB.items.Select(itemId)?.StackSize ?? 100;
                     while (count > 0)
                     {
                         if (Plugin._currentPlanetSpawnQuota == 0)
                             break;
+                        int chunk = count > stackSize ? stackSize : count;
+                        if (!dropSummary.ContainsKey(itemId)) dropSummary[itemId] = 0;
+                        dropSummary[itemId] += chunk;
                         Plugin.SpawnTrashAtDeathPosition(deathPos, itemId, count);
                         totalSpawned++;
-                        count -= LDB.items.Select(itemId)?.StackSize ?? 100;
+                        count -= stackSize;
                         if (count < 0) count = 0;
                     }
                 }
@@ -753,7 +803,23 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                         bool hasBase = lf?.defenseSystem?.battleBases != null && lf.defenseSystem.battleBases.count > 0;
                         landingLine = hasBase ? $"落点行星（带基站）: {lName}，{lDist:F0} m" : $"落点行星（无基站，表面落点）: {lName}，{lDist:F0} m";
                     }
-                    Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 黑雾太空敌舰击毁，已生成 {totalSpawned} 批战利品。被击毁: {enemyName}。{nearestLine}{(string.IsNullOrEmpty(nearestLine) ? "" : "；")}{landingLine}");
+                    int kindCount = dropSummary.Count;
+                    Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 黑雾太空敌舰击毁，已生成 {totalSpawned} 批（{kindCount} 种）战利品。被击毁: {enemyName}。{nearestLine}{(string.IsNullOrEmpty(nearestLine) ? "" : "；")}{landingLine}");
+                    if (dropSummary.Count > 0)
+                    {
+                        foreach (int id in dropSummary.Keys)
+                            Plugin._everDroppedItemIds.Add(id);
+                        string detail = string.Join("，", dropSummary.Select(kv => $"{Plugin.GetItemName(kv.Key)}-{kv.Value}"));
+                        Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk]     战利品明细: {detail}");
+                        var droppable = Plugin.GetDroppableItemIds();
+                        var neverDropped = droppable.Except(Plugin._everDroppedItemIds).ToList();
+                        Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk]     掉落表中从未掉落过的物品种类数: {neverDropped.Count}");
+                        if (neverDropped.Count > 0 && neverDropped.Count < 10)
+                        {
+                            string names = string.Join("，", neverDropped.Select(id => Plugin.GetItemName(id)));
+                            Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk]     从未掉落的物品: {names}");
+                        }
+                    }
                 }
             }
             catch (Exception ex)
