@@ -390,9 +390,8 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                 planetVel.y + toLand.y * speed,
                 planetVel.z + toLand.z * speed);
 
-            int stackSize = LDB.items.Select(itemId)?.StackSize ?? 100;
-            int chunk = count > stackSize ? stackSize : count;
-            // 与地面掉落一致：按当前垃圾数量缩短 life，游戏会在 GameTick 中每 tick 减 1，life 归零时 RemoveTrash
+            // 单堆使用完整数量，不拆堆；拾取正确。TrashObject 存盘将 count 存为 byte，>255 读档后截断，损失可忽略。
+            int chunk = count;
             int trashCount = trashSystem.trashCount;
             float lifeFactor = (float)(500.0 / (trashCount + 100));
             int life = SpaceDropBaseLifeTicks / 3 + (int)((double)SpaceDropBaseLifeTicks * (double)lifeFactor * 2.0 / 3.0 + 0.5);
@@ -671,27 +670,26 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                     Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 落点行星（{pName}）已达垃圾堆数上限（{Plugin.MaxTrashPerPlanet}），本击毁不生成战利品。");
                 }
 
-                int totalSpawned = 0;
+                // 先汇总再按种类每种只生成 1 堆，与太空敌舰击毁逻辑一致。
+                var dropSummary = new Dictionary<int, int>();
                 for (int i = 0; i < Plugin.SpaceDropRollCount; i++)
                 {
-                    if (Plugin._currentPlanetSpawnQuota == 0)
-                        break;
                     Plugin.RandomDropItemForSpace(Plugin.SpaceCraftEnemyLevelFallback, out int itemId, out int count, out int life);
                     if (itemId <= 0 || count <= 0)
                         continue;
-                    // 用户过滤：禁止掉落的物品不生成、不统计
                     if (gd.trashSystem.enemyDropBans != null && gd.trashSystem.enemyDropBans.Contains(itemId))
                         continue;
-                    Plugin._everDroppedItemIds.Add(itemId);
-                    while (count > 0)
-                    {
-                        if (Plugin._currentPlanetSpawnQuota == 0)
-                            break;
-                        Plugin.SpawnTrashAtDeathPosition(deathPos, itemId, count);
-                        totalSpawned++;
-                        count -= LDB.items.Select(itemId)?.StackSize ?? 100;
-                        if (count < 0) count = 0;
-                    }
+                    if (!dropSummary.ContainsKey(itemId)) dropSummary[itemId] = 0;
+                    dropSummary[itemId] += count;
+                }
+                int totalSpawned = 0;
+                foreach (var kv in dropSummary)
+                {
+                    if (Plugin._currentPlanetSpawnQuota == 0)
+                        break;
+                    Plugin._everDroppedItemIds.Add(kv.Key);
+                    Plugin.SpawnTrashAtDeathPosition(deathPos, kv.Key, kv.Value);
+                    totalSpawned++;
                 }
                 if (totalSpawned > 0 && planet != null && Plugin._currentPlanetSpawnQuota == 0)
                 {
@@ -759,31 +757,25 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                 else
                     Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk] 掉落等级：无巢穴（originAstroId={enemy.originAstroId}），使用 fallback={Plugin.SpaceCraftEnemyLevelFallback}");
 
-                int totalSpawned = 0;
+                // 先抽选并汇总：同种物品合并数量，再按种类每种只生成 1 堆（数量=min(该种总量,stackSize)），减少 Trash 实体数、减轻性能压力。
                 var dropSummary = new Dictionary<int, int>();
                 for (int i = 0; i < Plugin.SpaceDropRollCount; i++)
                 {
-                    if (Plugin._currentPlanetSpawnQuota == 0)
-                        break;
                     Plugin.RandomDropItemForSpace(enemyLevel, out int itemId, out int count, out int life);
                     if (itemId <= 0 || count <= 0)
                         continue;
-                    // 用户过滤：禁止掉落的物品不生成、不统计
                     if (gd.trashSystem.enemyDropBans != null && gd.trashSystem.enemyDropBans.Contains(itemId))
                         continue;
-                    int stackSize = LDB.items.Select(itemId)?.StackSize ?? 100;
-                    while (count > 0)
-                    {
-                        if (Plugin._currentPlanetSpawnQuota == 0)
-                            break;
-                        int chunk = count > stackSize ? stackSize : count;
-                        if (!dropSummary.ContainsKey(itemId)) dropSummary[itemId] = 0;
-                        dropSummary[itemId] += chunk;
-                        Plugin.SpawnTrashAtDeathPosition(deathPos, itemId, count);
-                        totalSpawned++;
-                        count -= stackSize;
-                        if (count < 0) count = 0;
-                    }
+                    if (!dropSummary.ContainsKey(itemId)) dropSummary[itemId] = 0;
+                    dropSummary[itemId] += count;
+                }
+                int totalSpawned = 0;
+                foreach (var kv in dropSummary)
+                {
+                    if (Plugin._currentPlanetSpawnQuota == 0)
+                        break;
+                    Plugin.SpawnTrashAtDeathPosition(deathPos, kv.Key, kv.Value);
+                    totalSpawned++;
                 }
                 if (totalSpawned > 0 && planet != null && Plugin._currentPlanetSpawnQuota == 0)
                 {
@@ -809,6 +801,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                     {
                         foreach (int id in dropSummary.Keys)
                             Plugin._everDroppedItemIds.Add(id);
+                        // 每种 1 堆，数量不截断，为汇总值
                         string detail = string.Join("，", dropSummary.Select(kv => $"{Plugin.GetItemName(kv.Key)}-{kv.Value}"));
                         Plugin.Log?.LogInfo($"[BattlefieldAnalysisBaseCollectSpaceJunk]     战利品明细: {detail}");
                         var droppable = Plugin.GetDroppableItemIds();
