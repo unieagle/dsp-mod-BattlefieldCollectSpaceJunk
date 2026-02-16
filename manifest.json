@@ -1,6 +1,6 @@
 {
     "name": "BattlefieldAnalysisBaseCollectSpaceJunk",
-    "version_number": "0.1.0",
+    "version_number": "1.1.0",
     "website_url": "https://github.com/unieagle/dsp-mod-BattlefieldCollectSpaceJunk.git",
     "description": "Collect space fleet debris into battlefield analysis bases.",
     "dependencies": []

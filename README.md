@@ -2,6 +2,8 @@
 
 ## 简介
 
+![收集太空残骸](https://github.com/unieagle/dsp-mod-BattlefieldCollectSpaceJunk/blob/main/img/collecting%20space%20debris.png?raw=true)
+
 本 Mod 让**击毁黑雾太空敌舰**时产生的战利品，从击毁位置**坠向战场分析基站所在行星**，由基站范围内拾取，实现太空战利品自动归集到基站。
 
 ### ✨ 核心特性

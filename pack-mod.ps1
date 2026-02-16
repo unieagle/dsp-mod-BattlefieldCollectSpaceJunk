@@ -14,6 +14,7 @@ $dllName = "BattlefieldAnalysisBaseCollectSpaceJunk.dll"
 $pluginInfoPath = Join-Path $scriptDir "PluginInfo.cs"
 $manifestPath = Join-Path $scriptDir "manifest.json"
 $readmePath = Join-Path $scriptDir "README.md"
+$changelogPath = Join-Path $scriptDir "CHANGELOG.md"
 $iconPath = Join-Path $scriptDir "icon.png"
 $binRelease = Join-Path $scriptDir "bin\Release"
 
@@ -64,6 +65,9 @@ try {
     $manifest.version_number = $version
     $manifest | ConvertTo-Json -Depth 4 -Compress | Set-Content (Join-Path $tempDir "manifest.json") -Encoding UTF8
     Copy-Item $readmePath (Join-Path $tempDir "README.md") -Force
+    if (Test-Path $changelogPath) {
+        Copy-Item $changelogPath (Join-Path $tempDir "CHANGELOG.md") -Force
+    }
     if (Test-Path $iconPath) {
         Copy-Item $iconPath (Join-Path $tempDir "icon.png") -Force
     }
