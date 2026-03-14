@@ -1190,12 +1190,21 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
 
                     double dx = px - planetPos.x, dy = py - planetPos.y, dz = pz - planetPos.z;
                     double heightAboveSurface = Math.Sqrt(dx * dx + dy * dy + dz * dz) - planetRadius;
+                    // speed 用行星相对速度（即曲线速度）做 handoff 阈值判断
                     double speed = Math.Sqrt(vx * vx + vy * vy + vz * vz);
 
                     bool handoff = heightAboveSurface <= 0
                         || (heightAboveSurface < Plugin.HandoffMaxHeight && speed <= Plugin.SafeLandingSpeed);
                     if (handoff)
                         continue;
+
+                    // 曲线速度 v = dP/ds·ds/dt 是"固定快照曲线"的导数，不包含行星平移速度。
+                    // Gravity() 碰撞计算使用 vectorLF3 = uVel - rhs3（rhs3 ≈ 行星表面速度），
+                    // 因此必须把行星速度加入 uVel，rhs3 才能正确抵消，得到正确的星球相对速度。
+                    VectorLF3 landPtVel = planet.GetUniversalVelocityAtLocalPoint(GameMain.gameTime, landPosLF);
+                    vx += landPtVel.x;
+                    vy += landPtVel.y;
+                    vz += landPtVel.z;
 
                     ref TrashData trash = ref dataPool[index];
                     trash.uPos.x = px;
