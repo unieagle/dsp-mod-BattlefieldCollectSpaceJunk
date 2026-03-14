@@ -22,8 +22,9 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
         /// <summary>太空舰船掉落：抽选次数（地面为 3），允许抽到无掉落。</summary>
         internal const int SpaceDropRollCount = 20;
 
-        /// <summary>太空舰船掉落：数量倍数（地面为基础值）</summary>
-        internal const int SpaceDropCountMultiplier = 100;
+        /// <summary>太空舰船掉落：数量倍数（地面为基础值），可从配置文件修改。</summary>
+        internal static int SpaceDropCountMultiplier => _spaceDropCountMultiplier?.Value ?? 100;
+        private static ConfigEntry<int>? _spaceDropCountMultiplier;
 
         /// <summary>太空敌舰掉落等级：无法从巢穴取得时使用的 fallback（游戏用 num2 = enemyLevel/3 与 EnemyDropLevel 比较）。</summary>
         internal const int SpaceCraftEnemyLevelFallback = 18;
@@ -35,17 +36,26 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
         /// <summary>坠落物抵达落点的目标时长（秒），据此计算速度大小以保证一致的坠落体验</summary>
         internal const double FallDurationSeconds = 10.0;
 
+        /// <summary>GameMain.gameTime 在反编译中已确认为秒（timef = timei * 1/60 的 getter），elapsed 直接为秒，此处为 1 表示不换算</summary>
+        internal const double GameTicksPerSecond = 1.0;
+
         /// <summary>最小下落速度（m/s），避免近处时过慢</summary>
         internal const double MinFallSpeed = 30.0;
 
-        /// <summary>距离地表此高度（米）以内不再控制速度，交由游戏逻辑处理</summary>
-        internal const double HandoffHeightAboveSurface = 10.0;
+        /// <summary>要求在此高度（米）时速度恰好为 SpeedAtTargetHeight，用于平滑速度曲线约束</summary>
+        internal const double SpeedLimitHeight = 30.0;
 
-        /// <summary>距落点此距离（米）内将速度降至 LandingSpeed，避免远距离奔袭到达时过快被弹飞</summary>
-        internal const double DecelStartDistFromLand = 100.0;
+        /// <summary>在 SpeedLimitHeight 处的目标速度（m/s），全程平滑无突变</summary>
+        internal const double SpeedAtTargetHeight = 30.0;
 
-        /// <summary>落地时目标速度（m/s），先快后慢的缓动确保平稳着陆</summary>
-        internal const double LandingSpeed = 30.0;
+        /// <summary>仅当高度低于此值且速度低于 SafeLandingSpeed 时才允许提前交给游戏，避免高速时提前放手导致撞地弹飞</summary>
+        internal const double HandoffMaxHeight = 2.0;
+        /// <summary>提前交给游戏逻辑时速度必须低于此值（m/s），否则继续由 Mod 控制减速</summary>
+        internal const double SafeLandingSpeed = 25.0;
+
+        /// <summary>求解 α 时 ease-out 指数范围 [AlphaMin, AlphaMax]，用于 v(s)=A(1-s)^α 满足 30m@30m/s</summary>
+        internal const double AlphaMin = 1.01;
+        internal const double AlphaMax = 80.0;
 
         /// <summary>轨道与地表的最小间隙（米），确保绕背时不会与星球碰撞（Bezier 曲线会略向内弯曲，控制点需留足余量）</summary>
         internal const double CurveClearanceMargin = 1200.0;
@@ -105,6 +115,8 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
             Instance = this;
             _enableDebugLog = Config.Bind("General", "EnableDebugLog", false,
                 "为 true 时在日志中输出详细的调试信息，用于排查问题。正常使用时建议设置为 false。\nSetting type: Boolean\nDefault value: false");
+            _spaceDropCountMultiplier = Config.Bind("General", "SpaceDropCountMultiplier", 100,
+                "太空舰船掉落数量倍数（地面为基础值）。默认 100，可调高增加掉落量或调低减少。\nSetting type: Integer\nDefault value: 100");
             var harmony = new Harmony(PluginInfo.PLUGIN_GUID);
             harmony.PatchAll(typeof(SpaceCraftDeathPatch));
             harmony.PatchAll(typeof(SpaceEnemyDeathPatch));
@@ -833,10 +845,107 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
         }
     }
 
-    /// <summary>每帧沿预计算平滑轨道设置坠落物位置与速度，10 秒从起点到终点，无横向抖动</summary>
+    /// <summary>每帧沿预计算平滑轨道设置坠落物位置与速度。时间 t=elapsed/10（秒），路径参数 s=1-(1-t)^α；
+    /// 每帧根据当前路径求 s_30（高度=30m 的 s），解出 α 使 v(s_30)=30，则 30m 处速度自然为 30 m/s，无硬性截断。</summary>
     [HarmonyPatch(typeof(TrashSystem), nameof(TrashSystem.GameTick))]
     public static class TrashSystemGravityPatch
     {
+        const int S30SampleCount = 32;
+        const double S30Delta = 1e-6;
+        const int AlphaBisectIter = 35;
+
+        /// <summary>弧线路径在参数 s 处的位置（相对行星的 u0,u1,um,r0,r3,minR 已归一化）</summary>
+        static void EvalArcPath(double s, double planetPosX, double planetPosY, double planetPosZ,
+            double u0x, double u0y, double u0z, double u1x, double u1y, double u1z, double umx, double umy, double umz,
+            double r0, double r3, double minR,
+            out double px, out double py, out double pz)
+        {
+            double ux, uy, uz;
+            if (s < 0.5)
+            {
+                double s2 = s * 2.0;
+                double dot0m = u0x * umx + u0y * umy + u0z * umz;
+                double th = Math.Acos(Math.Max(-1, Math.Min(1, dot0m)));
+                double sinTh = th > 1e-8 ? Math.Sin(th) : 1e-8;
+                double w0 = Math.Sin((1 - s2) * th) / sinTh;
+                double w1 = Math.Sin(s2 * th) / sinTh;
+                ux = w0 * u0x + w1 * umx;
+                uy = w0 * u0y + w1 * umy;
+                uz = w0 * u0z + w1 * umz;
+            }
+            else
+            {
+                double s2 = (s - 0.5) * 2.0;
+                double dotm1 = umx * u1x + umy * u1y + umz * u1z;
+                double th = Math.Acos(Math.Max(-1, Math.Min(1, dotm1)));
+                double sinTh = th > 1e-8 ? Math.Sin(th) : 1e-8;
+                double w0 = Math.Sin((1 - s2) * th) / sinTh;
+                double w1 = Math.Sin(s2 * th) / sinTh;
+                ux = w0 * umx + w1 * u1x;
+                uy = w0 * umy + w1 * u1y;
+                uz = w0 * umz + w1 * u1z;
+            }
+            double ulen = Math.Sqrt(ux * ux + uy * uy + uz * uz);
+            if (ulen > 1e-6) { ux /= ulen; uy /= ulen; uz /= ulen; }
+            double rCur;
+            if (s < 0.8)
+                rCur = Math.Max(r0, minR);
+            else
+            {
+                double f = (s - 0.8) / 0.2;
+                f = f * f * (3 - 2 * f);
+                rCur = r0 + (r3 - r0) * f;
+            }
+            px = planetPosX + ux * rCur;
+            py = planetPosY + uy * rCur;
+            pz = planetPosZ + uz * rCur;
+        }
+
+        /// <summary>Bezier 路径在 s 处的位置与 dP/ds</summary>
+        static void EvalBezierPath(double s, double P0x, double P0y, double P0z, double p1x, double p1y, double p1z, double p2x, double p2y, double p2z, double P3x, double P3y, double P3z,
+            double dp1x, double dp1y, double dp1z, double dp2x, double dp2y, double dp2z, double dp3x, double dp3y, double dp3z,
+            out double px, out double py, out double pz, out double dPdsx, out double dPdsy, out double dPdsz)
+        {
+            double sm = 1 - s, sm2 = sm * sm, sm3 = sm2 * sm, s2 = s * s, s3 = s2 * s;
+            px = sm3 * P0x + 3 * sm2 * s * p1x + 3 * sm * s2 * p2x + s3 * P3x;
+            py = sm3 * P0y + 3 * sm2 * s * p1y + 3 * sm * s2 * p2y + s3 * P3y;
+            pz = sm3 * P0z + 3 * sm2 * s * p1z + 3 * sm * s2 * p2z + s3 * P3z;
+            dPdsx = sm2 * dp1x + 2 * sm * s * dp2x + s2 * dp3x;
+            dPdsy = sm2 * dp1y + 2 * sm * s * dp2y + s2 * dp3y;
+            dPdsz = sm2 * dp1z + 2 * sm * s * dp2z + s2 * dp3z;
+        }
+
+        /// <summary>
+        /// 求解 α 使 f(α) = α*(1-s30)^((α-1)/α) = R，R = FallDurationSeconds*SpeedAtTargetHeight/|dP/ds|_30。
+        /// f(α) 是"U形"非单调函数，在 α_opt = -ln(1-s30) 处取极小值 f_min。
+        /// 若 R &lt; f_min（太空长距离掉落常见），方程无精确解；返回 α_opt，此时目标高度处速度为可达最小值（最接近 30 m/s），仍保持 ease-out 特性。
+        /// 若 R ≥ f_min，在单调递增段 [AlphaMin, AlphaMax] 二分，找到右侧的大-α 根（ease-out 更强）。
+        /// </summary>
+        static double SolveAlpha(double s30, double R)
+        {
+            if (R <= 0 || s30 >= 1 - 1e-9) return Plugin.AlphaMax;
+            double oneMinusS = Math.Max(1 - s30, 1e-9);
+
+            // f(α) 极小值点 α_opt = -ln(1-s30)，极小值 f_min
+            double alphaOpt = Math.Max(Plugin.AlphaMin, Math.Min(Plugin.AlphaMax, -Math.Log(oneMinusS)));
+            double fMin = alphaOpt * Math.Pow(oneMinusS, 1.0 - 1.0 / alphaOpt);
+
+            // 无精确解：返回 α_opt（最接近目标速度的可达 α，曲线仍有 ease-out）
+            if (R <= fMin) return alphaOpt;
+
+            // 有解：在 [AlphaMin, AlphaMax] 二分，可收敛到右侧单调增分支的根
+            double lo = Plugin.AlphaMin, hi = Plugin.AlphaMax;
+            for (int i = 0; i < AlphaBisectIter; i++)
+            {
+                double mid = (lo + hi) * 0.5;
+                double exp = (mid - 1) / mid;
+                double f = mid * Math.Pow(oneMinusS, exp);
+                if (f < R) lo = mid;
+                else hi = mid;
+            }
+            return (lo + hi) * 0.5;
+        }
+
         static void Postfix(TrashSystem __instance)
         {
             try
@@ -848,8 +957,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                 var container = __instance.container;
                 var dataPool = container.trashDataPool;
                 var trails = Plugin.Instance._trashTrails;
-                double gameTimeSec = GameMain.gameTime;
-
+                // GameMain.gameTime 为秒（GameMain：timef = timei * 1/60），elapsed 直接为秒，t 在 10 秒内 0→1
                 for (int tr = 0; tr < trails.Count; tr++)
                 {
                     int index = trails[tr].trashIndex;
@@ -868,8 +976,8 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                     VectorLF3 planetPos = astrosData[astroId].uPos;
 
                     double spawnTime = trails[tr].spawnGameTime;
-                    double elapsed = gameTimeSec - spawnTime;
-                    double t = elapsed / Plugin.FallDurationSeconds;
+                    double elapsedSec = GameMain.gameTime - spawnTime;
+                    double t = elapsedSec / Plugin.FallDurationSeconds;
                     if (t >= 1.0)
                         continue;
                     if (t < 0)
@@ -917,9 +1025,23 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                         }
                         double umx = crossX / crossLen, umy = crossY / crossLen, umz = crossZ / crossLen;
 
-                        double alpha = Plugin.LandingSpeed / (r3 > 1e-6 ? r3 * 0.5 : 50.0);
-                        alpha = alpha < 0.1 ? 0.1 : (alpha > 1.0 ? 1.0 : alpha);
-                        double sParam = Math.Pow(t, alpha);
+                        double s30 = 0.5;
+                        double s30Lo = 0.01, s30Hi = 0.99;
+                        for (int k = 0; k < S30SampleCount; k++)
+                        {
+                            s30 = (s30Lo + s30Hi) * 0.5;
+                            EvalArcPath(s30, planetPos.x, planetPos.y, planetPos.z, u0x, u0y, u0z, u1x, u1y, u1z, umx, umy, umz, r0, r3, planetRadius + Plugin.CurveClearanceMargin, out double qx, out double qy, out double qz);
+                            double h = Math.Sqrt((qx - planetPos.x) * (qx - planetPos.x) + (qy - planetPos.y) * (qy - planetPos.y) + (qz - planetPos.z) * (qz - planetPos.z)) - planetRadius;
+                            if (h > Plugin.SpeedLimitHeight) s30Lo = s30; else s30Hi = s30;
+                        }
+                        s30 = (s30Lo + s30Hi) * 0.5;
+                        EvalArcPath(s30 + S30Delta, planetPos.x, planetPos.y, planetPos.z, u0x, u0y, u0z, u1x, u1y, u1z, umx, umy, umz, r0, r3, planetRadius + Plugin.CurveClearanceMargin, out double qpX, out double qpY, out double qpZ);
+                        EvalArcPath(s30 - S30Delta, planetPos.x, planetPos.y, planetPos.z, u0x, u0y, u0z, u1x, u1y, u1z, umx, umy, umz, r0, r3, planetRadius + Plugin.CurveClearanceMargin, out double qmX, out double qmY, out double qmZ);
+                        double dPdsMag = Math.Sqrt((qpX - qmX) * (qpX - qmX) + (qpY - qmY) * (qpY - qmY) + (qpZ - qmZ) * (qpZ - qmZ)) / (2.0 * S30Delta);
+                        double R = Plugin.FallDurationSeconds * Plugin.SpeedAtTargetHeight / Math.Max(dPdsMag, 1e-6);
+                        double alpha = SolveAlpha(s30, R);
+
+                        double sParam = 1.0 - Math.Pow(1.0 - t, alpha);
 
                         double ux, uy, uz;
                         double rCur;
@@ -965,7 +1087,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
 
                         double dt = 0.01;
                         double t1 = Math.Min(1.0, t + dt / Plugin.FallDurationSeconds);
-                        double s1 = Math.Pow(t1, alpha);
+                        double s1 = 1.0 - Math.Pow(1.0 - t1, alpha);
                         double ux1, uy1, uz1;
                         double r1;
                         if (s1 < 0.5)
@@ -1036,9 +1158,22 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                         double dp2x = 3 * (p2x - p1x), dp2y = 3 * (p2y - p1y), dp2z = 3 * (p2z - p1z);
                         double dp3x = 3 * (P3.x - p2x), dp3y = 3 * (P3.y - p2y), dp3z = 3 * (P3.z - p2z);
                         double dPds1 = Math.Sqrt(dp3x * dp3x + dp3y * dp3y + dp3z * dp3z);
-                        double alpha = dPds1 > 1e-6 ? Plugin.LandingSpeed / dPds1 : 1.0;
-                        alpha = alpha < 0.1 ? 0.1 : (alpha > 1.0 ? 1.0 : alpha);
-                        double sParam = Math.Pow(t, alpha);
+
+                        double s30B = 0.5, s30LoB = 0.01, s30HiB = 0.99;
+                        for (int k = 0; k < S30SampleCount; k++)
+                        {
+                            s30B = (s30LoB + s30HiB) * 0.5;
+                            EvalBezierPath(s30B, P0.x, P0.y, P0.z, p1x, p1y, p1z, p2x, p2y, p2z, P3.x, P3.y, P3.z, dp1x, dp1y, dp1z, dp2x, dp2y, dp2z, dp3x, dp3y, dp3z, out double qxB, out double qyB, out double qzB, out _, out _, out _);
+                            double hB = Math.Sqrt((qxB - planetPos.x) * (qxB - planetPos.x) + (qyB - planetPos.y) * (qyB - planetPos.y) + (qzB - planetPos.z) * (qzB - planetPos.z)) - planetRadius;
+                            if (hB > Plugin.SpeedLimitHeight) s30LoB = s30B; else s30HiB = s30B;
+                        }
+                        s30B = (s30LoB + s30HiB) * 0.5;
+                        EvalBezierPath(s30B, P0.x, P0.y, P0.z, p1x, p1y, p1z, p2x, p2y, p2z, P3.x, P3.y, P3.z, dp1x, dp1y, dp1z, dp2x, dp2y, dp2z, dp3x, dp3y, dp3z, out _, out _, out _, out double dPds30x, out double dPds30y, out double dPds30z);
+                        double dPds30Mag = Math.Sqrt(dPds30x * dPds30x + dPds30y * dPds30y + dPds30z * dPds30z);
+                        double RB = Plugin.FallDurationSeconds * Plugin.SpeedAtTargetHeight / Math.Max(dPds30Mag, 1e-6);
+                        double alphaB = SolveAlpha(s30B, RB);
+
+                        double sParam = 1.0 - Math.Pow(1.0 - t, alphaB);
                         double sm = 1 - sParam, sm2 = sm * sm, sm3 = sm2 * sm, s2 = sParam * sParam, s3 = s2 * sParam;
                         px = sm3 * P0.x + 3 * sm2 * sParam * p1x + 3 * sm * s2 * p2x + s3 * P3.x;
                         py = sm3 * P0.y + 3 * sm2 * sParam * p1y + 3 * sm * s2 * p2y + s3 * P3.y;
@@ -1046,8 +1181,8 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                         double dPdsx = sm2 * dp1x + 2 * sm * sParam * dp2x + s2 * dp3x;
                         double dPdsy = sm2 * dp1y + 2 * sm * sParam * dp2y + s2 * dp3y;
                         double dPdsz = sm2 * dp1z + 2 * sm * sParam * dp2z + s2 * dp3z;
-                        double tSafe = t < 0.001 ? 0.001 : t;
-                        double dsdt = alpha * Math.Pow(tSafe, alpha - 1.0) / Plugin.FallDurationSeconds;
+                        double oneMinusT = Math.Max(1.0 - t, 0.001);
+                        double dsdt = alphaB * Math.Pow(oneMinusT, alphaB - 1.0) / Plugin.FallDurationSeconds;
                         vx = dPdsx * dsdt;
                         vy = dPdsy * dsdt;
                         vz = dPdsz * dsdt;
@@ -1055,18 +1190,12 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
 
                     double dx = px - planetPos.x, dy = py - planetPos.y, dz = pz - planetPos.z;
                     double heightAboveSurface = Math.Sqrt(dx * dx + dy * dy + dz * dz) - planetRadius;
-                    if (heightAboveSurface < Plugin.HandoffHeightAboveSurface)
-                        continue;
+                    double speed = Math.Sqrt(vx * vx + vy * vy + vz * vz);
 
-                    double toLandX = P3.x - px, toLandY = P3.y - py, toLandZ = P3.z - pz;
-                    double distToLand = Math.Sqrt(toLandX * toLandX + toLandY * toLandY + toLandZ * toLandZ);
-                    if (distToLand <= Plugin.DecelStartDistFromLand && distToLand > 1e-6)
-                    {
-                        double scale = Plugin.LandingSpeed / distToLand;
-                        vx = toLandX * scale;
-                        vy = toLandY * scale;
-                        vz = toLandZ * scale;
-                    }
+                    bool handoff = heightAboveSurface <= 0
+                        || (heightAboveSurface < Plugin.HandoffMaxHeight && speed <= Plugin.SafeLandingSpeed);
+                    if (handoff)
+                        continue;
 
                     ref TrashData trash = ref dataPool[index];
                     trash.uPos.x = px;
