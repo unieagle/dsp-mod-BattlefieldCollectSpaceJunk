@@ -49,7 +49,7 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
         internal const double SpeedAtTargetHeight = 30.0;
 
         /// <summary>仅当高度低于此值且速度低于 SafeLandingSpeed 时才允许提前交给游戏，避免高速时提前放手导致撞地弹飞</summary>
-        internal const double HandoffMaxHeight = 2.0;
+        internal const double HandoffMaxHeight = 10.0;
         /// <summary>提前交给游戏逻辑时速度必须低于此值（m/s），否则继续由 Mod 控制减速</summary>
         internal const double SafeLandingSpeed = 25.0;
 
