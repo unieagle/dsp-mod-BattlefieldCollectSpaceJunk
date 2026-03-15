@@ -8,7 +8,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>BattlefieldAnalysisBaseCollectSpaceJunk</AssemblyName>
     <RootNamespace>BattlefieldAnalysisBaseCollectSpaceJunk</RootNamespace>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Description>Collect space fleet debris into battlefield analysis bases.</Description>
   </PropertyGroup>
 
