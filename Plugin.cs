@@ -102,8 +102,8 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
             return set;
         }
 
-        /// <summary>本 Mod 生成的坠落物：尾焰粒子 + 目标落点 + 生成时间与位置（用于平滑轨道）</summary>
-        internal readonly List<(int trashIndex, GameObject trailGo, float landedAt, Vector3 targetLandPosLocal, double spawnGameTime, VectorLF3 spawnPos)> _trashTrails = new List<(int, GameObject, float, Vector3, double, VectorLF3)>();
+        /// <summary>本 Mod 生成的坠落物：尾焰粒子（可为 null，仅当前星系时创建）+ 目标落点 + 生成时间与位置（用于平滑轨道）。始终加入以驱动轨迹，含远端星系。</summary>
+        internal readonly List<(int trashIndex, GameObject? trailGo, float landedAt, Vector3 targetLandPosLocal, double spawnGameTime, VectorLF3 spawnPos)> _trashTrails = new List<(int, GameObject?, float, Vector3, double, VectorLF3)>();
         private const float TrailDestroyDelayAfterLand = 2.5f;
 
         /// <summary>本 Mod 生成的太空掉落：trashIndex → 目标星 astroId。游戏 Gravity 每帧会把 nearPlanetId 置 0，无法依赖其统计，故自维护此表用于每星配额。</summary>
@@ -185,10 +185,10 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
             for (int i = _trashTrails.Count - 1; i >= 0; i--)
             {
                 int index = _trashTrails[i].trashIndex;
-                GameObject go = _trashTrails[i].trailGo;
+                GameObject? go = _trashTrails[i].trailGo;
                 float landedAt = _trashTrails[i].landedAt;
 
-                if (go == null || index < 0 || index >= objPool.Length)
+                if (index < 0 || index >= objPool.Length)
                 {
                     DestroyTrailGameObject(go);
                     _trashTrails.RemoveAt(i);
@@ -201,6 +201,10 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                     _trashTrails.RemoveAt(i);
                     continue;
                 }
+
+                // 无尾迹粒子时仅做回收检查，不更新粒子位置（轨迹由 TrashSystemGravityPatch 驱动）
+                if (go == null)
+                    continue;
 
                 // 落地后停止发射粒子，延迟一定时间后销毁尾焰以释放资源（未收集的物资不会永久占用）
                 if (dataPool[index].landPlanetId != 0)
@@ -442,10 +446,17 @@ namespace BattlefieldAnalysisBaseCollectSpaceJunk
                 _currentPlanetSpawnQuota--;
             try
             {
-                if (Instance != null && ShouldSpawnTrailForDrop(planet, deathPos))
+                // 方案 A：轨迹与尾迹解耦。始终加入 _trashTrails 以驱动 10 秒落体轨迹（含远端星系）；尾迹粒子仅当前星系/附近时创建，避免远处大量粒子。
+                if (Instance != null)
                 {
-                    GameObject trailGo = Instance.CreateTrailParticle();
+                    bool withTrail = ShouldSpawnTrailForDrop(planet, deathPos);
+                    GameObject? trailGo = withTrail ? Instance.CreateTrailParticle() : null;
                     Instance._trashTrails.Add((trashIndex, trailGo, -1f, landPosLocal, GameMain.gameTime, deathPos));
+                    if (EnableDebugLog)
+                    {
+                        var (pName, _) = GetPlanetNameAndDistance(planet, deathPos);
+                        Log?.LogInfo($"[{PluginInfo.PLUGIN_NAME}] 轨迹已登记 idx={trashIndex} 目标={pName} 尾迹={(withTrail ? "有" : "无(远端)")}");
+                    }
                 }
             }
             catch { }
